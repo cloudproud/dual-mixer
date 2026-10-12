@@ -93,7 +93,7 @@ DestinationDialog::DestinationDialog(Manager *manager, Destination *destination,
 	general->addRow(QString(), note(T("DestinationDialog.MixNote"), content));
 	layout->addLayout(general);
 
-	if (destination->active() && destination->holdsEncoders()) {
+	if (destination->active() && destination->holdsVideo()) {
 		auto *locked = note(T("DestinationDialog.ActiveLocked"), content);
 		locked->setStyleSheet(QStringLiteral("color: #e09030;"));
 		layout->addWidget(locked);
@@ -111,6 +111,9 @@ DestinationDialog::DestinationDialog(Manager *manager, Destination *destination,
 	case DestinationType::Stream:
 		layout->addWidget(buildStream());
 		layout->addWidget(buildEncoding());
+		break;
+	case DestinationType::Device:
+		layout->addWidget(buildDevice());
 		break;
 	}
 	layout->addStretch(1);
@@ -284,25 +287,57 @@ QWidget *DestinationDialog::buildEncoding()
 	audioBitrate_->setValue(encoded->audioBitrate());
 	audioForm->addRow(T("DestinationDialog.AudioBitrate"), audioBitrate_);
 
+	audioForm->addRow(encoded->multipleAudioTracks() ? T("DestinationDialog.AudioTracks")
+							 : T("DestinationDialog.AudioTrack"),
+			  buildTrackPicker(encoded->audioTracks(), encoded->multipleAudioTracks(), box));
+	audioForm->addRow(QString(), note(T("Outputs.AudioInfo"), box));
+	layout->addLayout(audioForm);
+
+	box->setEnabled(!destination_->active());
+	return box;
+}
+
+QWidget *DestinationDialog::buildTrackPicker(const std::vector<int> &selected, bool multiple, QWidget *parent)
+{
 	/* Explicit audio selection: which OBS mixer tracks this destination carries. */
-	auto *tracksWidget = new QWidget(box);
-	auto *tracksLayout = new QVBoxLayout(tracksWidget);
-	tracksLayout->setContentsMargins(0, 0, 0, 0);
-	const bool multiple = encoded->multipleAudioTracks();
-	auto *group = new QButtonGroup(tracksWidget);
+	auto *widget = new QWidget(parent);
+	auto *layout = new QVBoxLayout(widget);
+	layout->setContentsMargins(0, 0, 0, 0);
+	auto *group = new QButtonGroup(widget);
 	group->setExclusive(!multiple);
-	const std::vector<int> &selected = encoded->audioTracks();
 	for (int track = 0; track < kAudioTracks; track++) {
-		QAbstractButton *button = multiple ? static_cast<QAbstractButton *>(new QCheckBox(tracksWidget))
-						   : new QRadioButton(tracksWidget);
+		QAbstractButton *button = multiple ? static_cast<QAbstractButton *>(new QCheckBox(widget))
+						   : new QRadioButton(widget);
 		button->setText(audioTrackLabel(track));
 		button->setChecked(std::find(selected.begin(), selected.end(), track) != selected.end());
 		group->addButton(button, track);
-		tracksLayout->addWidget(button);
+		layout->addWidget(button);
 		tracks_.push_back(button);
 	}
-	audioForm->addRow(multiple ? T("DestinationDialog.AudioTracks") : T("DestinationDialog.AudioTrack"),
-			  tracksWidget);
+	return widget;
+}
+
+QWidget *DestinationDialog::buildDevice()
+{
+	auto *device = static_cast<DeviceDestination *>(destination_);
+	auto *box = new QGroupBox(T("DestinationDialog.Device"), this);
+	auto *layout = new QVBoxLayout(box);
+
+	if (!DeviceDestination::available()) {
+		auto *missing = note(T("Destination.Device.Error.Unavailable"), box);
+		missing->setStyleSheet(QStringLiteral("color: #e09030;"));
+		layout->addWidget(missing);
+	}
+
+	deviceSettings_ =
+		settingsWithDefaults(OBSDataAutoRelease(DeviceDestination::defaults()), device->outputSettings());
+	layout->addWidget(new PropertiesForm(&DeviceDestination::properties, deviceSettings_, box));
+	layout->addWidget(note(T("DestinationDialog.DeviceNote"), box));
+
+	auto *audioForm = new QFormLayout();
+	audioForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+	audioForm->addRow(T("DestinationDialog.AudioTrack"), buildTrackPicker({device->audioTrack()}, false, box));
+	audioForm->addRow(QString(), note(T("DestinationDialog.DeviceAudioNote"), box));
 	audioForm->addRow(QString(), note(T("Outputs.AudioInfo"), box));
 	layout->addLayout(audioForm);
 
@@ -366,6 +401,14 @@ void DestinationDialog::accept()
 			break;
 		static_cast<StreamDestination *>(destination_)
 			->setService(service_->currentData().toString(), serviceSettings_);
+		break;
+	}
+	case DestinationType::Device: {
+		if (destination_->active())
+			break;
+		auto *device = static_cast<DeviceDestination *>(destination_);
+		device->setOutputSettings(deviceSettings_);
+		device->setAudioTrack(tracks.front());
 		break;
 	}
 	}

@@ -66,8 +66,8 @@ public:
 	Destination *destination(const QString &id) const;
 	Destination *addDestination(DestinationType type, const QString &mixId);
 	void removeDestination(const QString &id);
-	/* True if any destination of the mix currently has encoders bound to its video. */
-	bool mixHasActiveEncoders(const QString &mixId) const;
+	/* True if any active destination of the mix has an output bound to its video. */
+	bool mixVideoInUse(const QString &mixId) const;
 
 	NativeOutputs nativeOutputs() const;
 

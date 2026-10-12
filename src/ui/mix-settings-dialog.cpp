@@ -193,7 +193,7 @@ void MixSettingsDialog::accept()
 	const bool resolutionChanged = follow != mix_->followsMainResolution() ||
 				       (!follow && (cx != mix_->customWidth() || cy != mix_->customHeight()));
 	const bool audioChanged = mixAudio_->isChecked() != mix_->mixesAudio();
-	if ((resolutionChanged || audioChanged) && manager_->mixHasActiveEncoders(mix_->id())) {
+	if ((resolutionChanged || audioChanged) && manager_->mixVideoInUse(mix_->id())) {
 		QMessageBox::warning(this, T("MixSettings.Title").arg(mix_->name()), T("MixSettings.VideoBusy"));
 	} else {
 		if (resolutionChanged)

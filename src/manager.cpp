@@ -223,10 +223,10 @@ Destination *Manager::destination(const QString &id) const
 	return nullptr;
 }
 
-bool Manager::mixHasActiveEncoders(const QString &mixId) const
+bool Manager::mixVideoInUse(const QString &mixId) const
 {
 	for (Destination *destination : destinations_) {
-		if (destination->mixId() == mixId && destination->holdsEncoders() && destination->active())
+		if (destination->mixId() == mixId && destination->holdsVideo() && destination->active())
 			return true;
 	}
 	return false;
@@ -252,6 +252,8 @@ Destination *Manager::createDestination(DestinationType type, const QString &id)
 		return new RecordingDestination(this, id);
 	case DestinationType::Stream:
 		return new StreamDestination(this, id);
+	case DestinationType::Device:
+		return new DeviceDestination(this, id);
 	}
 	return nullptr;
 }

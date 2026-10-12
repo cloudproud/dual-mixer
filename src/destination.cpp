@@ -28,6 +28,7 @@ the Free Software Foundation; either version 2 of the License, or
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 namespace dm {
 
@@ -95,13 +96,15 @@ const char *destinationTypeId(DestinationType type)
 		return "recording";
 	case DestinationType::Stream:
 		return "stream";
+	case DestinationType::Device:
+		return "device";
 	}
 	return "display";
 }
 
 std::optional<DestinationType> destinationTypeFromId(const char *id)
 {
-	for (DestinationType type : {DestinationType::Display, DestinationType::Recording, DestinationType::Stream}) {
+	for (DestinationType type : kDestinationTypes) {
 		if (id && strcmp(id, destinationTypeId(type)) == 0)
 			return type;
 	}
@@ -117,6 +120,8 @@ QString destinationTypeName(DestinationType type)
 		return T("Destination.Type.Recording");
 	case DestinationType::Stream:
 		return T("Destination.Type.Stream");
+	case DestinationType::Device:
+		return T("Destination.Type.Device");
 	}
 	return QString();
 }
@@ -144,7 +149,7 @@ bool Destination::setMixId(const QString &mixId)
 {
 	if (mixId == mixId_)
 		return true;
-	if (active() && holdsEncoders())
+	if (active() && holdsVideo())
 		return false;
 	mixId_ = mixId;
 	if (active())
@@ -343,10 +348,117 @@ void DisplayDestination::load(obs_data_t *data)
 }
 
 /* ------------------------------------------------------------------------- */
+/* OutputDestination */
+
+OutputDestination::OutputDestination(Manager *manager, QString id, DestinationType type)
+	: Destination(manager, std::move(id), type)
+{
+}
+
+OutputDestination::~OutputDestination()
+{
+	forceStop();
+}
+
+bool OutputDestination::startOutput(Mix *mix, const QString &startError)
+{
+	signal_handler_t *handler = obs_output_get_signal_handler(output_);
+	startSignal_.Connect(handler, "start", onStart, this);
+	stopSignal_.Connect(handler, "stop", onStop, this);
+	reconnectSignal_.Connect(handler, "reconnect", onReconnect, this);
+	reconnectSuccessSignal_.Connect(handler, "reconnect_success", onReconnectSuccess, this);
+
+	setState(State::Starting);
+	if (!obs_output_start(output_)) {
+		const char *last = obs_output_get_last_error(output_);
+		const QString message = last && *last ? qstr(last) : startError;
+		release();
+		setState(State::Inactive);
+		setError(message);
+		return false;
+	}
+
+	obs_log(LOG_INFO, "Destination '%s' started from mix '%s' (%s)", utf8(name()).c_str(),
+		utf8(mix->name()).c_str(), obs_output_get_id(output_));
+	return true;
+}
+
+void OutputDestination::stop()
+{
+	if (!output_ || state() == State::Stopping)
+		return;
+	setState(State::Stopping);
+	obs_output_stop(output_);
+}
+
+void OutputDestination::forceStop()
+{
+	if (!output_)
+		return;
+	disconnectSignals();
+	if (obs_output_active(output_))
+		obs_output_force_stop(output_);
+	release();
+	setState(State::Inactive);
+}
+
+void OutputDestination::disconnectSignals()
+{
+	startSignal_.Disconnect();
+	stopSignal_.Disconnect();
+	reconnectSignal_.Disconnect();
+	reconnectSuccessSignal_.Disconnect();
+}
+
+void OutputDestination::release()
+{
+	disconnectSignals();
+	/* Releasing the output joins its stop thread, after which its encoders are idle. */
+	output_ = nullptr;
+	releaseOutput();
+}
+
+void OutputDestination::handleStopped(int code, const QString &error)
+{
+	release();
+	setState(State::Inactive);
+	if (code != OBS_OUTPUT_SUCCESS)
+		setError(error.isEmpty() ? stopCodeText(code) : stopCodeText(code) + QStringLiteral(": ") + error);
+	obs_log(LOG_INFO, "Destination '%s' stopped (code %d)", utf8(name()).c_str(), code);
+}
+
+void OutputDestination::onStart(void *data, calldata_t *)
+{
+	auto *self = static_cast<OutputDestination *>(data);
+	invokeOnUi(self, [self]() { self->setState(State::Active); });
+}
+
+void OutputDestination::onStop(void *data, calldata_t *cd)
+{
+	auto *self = static_cast<OutputDestination *>(data);
+	const int code = int(calldata_int(cd, "code"));
+	obs_output_t *output = static_cast<obs_output_t *>(calldata_ptr(cd, "output"));
+	const QString error = qstr(output ? obs_output_get_last_error(output) : nullptr);
+	invokeOnUi(self, [self, code, error]() { self->handleStopped(code, error); });
+}
+
+void OutputDestination::onReconnect(void *data, calldata_t *)
+{
+	auto *self = static_cast<OutputDestination *>(data);
+	invokeOnUi(self, [self]() { self->setState(State::Reconnecting); });
+}
+
+void OutputDestination::onReconnectSuccess(void *data, calldata_t *)
+{
+	auto *self = static_cast<OutputDestination *>(data);
+	invokeOnUi(self, [self]() { self->setState(State::Active); });
+}
+
+/* ------------------------------------------------------------------------- */
 /* EncodedDestination */
 
 EncodedDestination::EncodedDestination(Manager *manager, QString id, DestinationType type)
-	: Destination(manager, std::move(id), type)
+	: OutputDestination(manager, std::move(id), type)
 {
 	const std::vector<QString> video = availableVideoEncoders();
 	if (!video.empty()) {
@@ -533,96 +645,13 @@ bool EncodedDestination::start()
 		audioEncoders_.emplace_back(encoder.Get());
 	}
 
-	signal_handler_t *handler = obs_output_get_signal_handler(output_);
-	startSignal_.Connect(handler, "start", onStart, this);
-	stopSignal_.Connect(handler, "stop", onStop, this);
-	reconnectSignal_.Connect(handler, "reconnect", onReconnect, this);
-	reconnectSuccessSignal_.Connect(handler, "reconnect_success", onReconnectSuccess, this);
-
-	setState(State::Starting);
-	if (!obs_output_start(output_)) {
-		const char *last = obs_output_get_last_error(output_);
-		const QString message = last && *last ? qstr(last) : T("Destination.Error.Start");
-		release();
-		setState(State::Inactive);
-		setError(message);
-		return false;
-	}
-
-	obs_log(LOG_INFO, "Destination '%s' started from mix '%s' (%s)", utf8(name()).c_str(),
-		utf8(mix->name()).c_str(), obs_output_get_id(output_));
-	return true;
+	return startOutput(mix, T("Destination.Error.Start"));
 }
 
-void EncodedDestination::stop()
+void EncodedDestination::releaseOutput()
 {
-	if (!output_ || state() == State::Stopping)
-		return;
-	setState(State::Stopping);
-	obs_output_stop(output_);
-}
-
-void EncodedDestination::forceStop()
-{
-	if (!output_)
-		return;
-	startSignal_.Disconnect();
-	stopSignal_.Disconnect();
-	reconnectSignal_.Disconnect();
-	reconnectSuccessSignal_.Disconnect();
-	if (obs_output_active(output_))
-		obs_output_force_stop(output_);
-	release();
-	setState(State::Inactive);
-}
-
-void EncodedDestination::release()
-{
-	startSignal_.Disconnect();
-	stopSignal_.Disconnect();
-	reconnectSignal_.Disconnect();
-	reconnectSuccessSignal_.Disconnect();
-	/* Releasing the output joins its stop thread, after which the encoders are idle. */
-	output_ = nullptr;
-	releaseOutput();
 	videoEncoder_ = nullptr;
 	audioEncoders_.clear();
-}
-
-void EncodedDestination::handleStopped(int code, const QString &error)
-{
-	release();
-	setState(State::Inactive);
-	if (code != OBS_OUTPUT_SUCCESS)
-		setError(error.isEmpty() ? stopCodeText(code) : stopCodeText(code) + QStringLiteral(": ") + error);
-	obs_log(LOG_INFO, "Destination '%s' stopped (code %d)", utf8(name()).c_str(), code);
-}
-
-void EncodedDestination::onStart(void *data, calldata_t *)
-{
-	auto *self = static_cast<EncodedDestination *>(data);
-	invokeOnUi(self, [self]() { self->setState(State::Active); });
-}
-
-void EncodedDestination::onStop(void *data, calldata_t *cd)
-{
-	auto *self = static_cast<EncodedDestination *>(data);
-	const int code = int(calldata_int(cd, "code"));
-	obs_output_t *output = static_cast<obs_output_t *>(calldata_ptr(cd, "output"));
-	const QString error = qstr(output ? obs_output_get_last_error(output) : nullptr);
-	invokeOnUi(self, [self, code, error]() { self->handleStopped(code, error); });
-}
-
-void EncodedDestination::onReconnect(void *data, calldata_t *)
-{
-	auto *self = static_cast<EncodedDestination *>(data);
-	invokeOnUi(self, [self]() { self->setState(State::Reconnecting); });
-}
-
-void EncodedDestination::onReconnectSuccess(void *data, calldata_t *)
-{
-	auto *self = static_cast<EncodedDestination *>(data);
-	invokeOnUi(self, [self]() { self->setState(State::Active); });
 }
 
 void EncodedDestination::save(obs_data_t *data) const
@@ -857,6 +886,12 @@ OBSOutput StreamDestination::createOutput(obs_data_t *videoSettings, obs_data_t 
 	return output.Get();
 }
 
+void StreamDestination::releaseOutput()
+{
+	service_ = nullptr;
+	EncodedDestination::releaseOutput();
+}
+
 void StreamDestination::save(obs_data_t *data) const
 {
 	EncodedDestination::save(data);
@@ -874,6 +909,197 @@ void StreamDestination::load(obs_data_t *data)
 		if (settings)
 			obs_data_apply(serviceSettings_, settings);
 	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* DeviceDestination */
+
+namespace {
+
+constexpr const char *kDeckLinkOutput = "decklink_output";
+
+/* Name of the enabled list item matching the current setting; empty if there is none. */
+QString selectedItemName(obs_properties_t *props, const char *name, obs_data_t *settings)
+{
+	obs_property_t *list = obs_properties_get(props, name);
+	if (!list)
+		return QString();
+	const bool isInt = obs_property_list_format(list) == OBS_COMBO_FORMAT_INT;
+	for (size_t i = 0, n = obs_property_list_item_count(list); i < n; i++) {
+		if (obs_property_list_item_disabled(list, i))
+			continue;
+		const bool match = isInt ? obs_property_list_item_int(list, i) == obs_data_get_int(settings, name)
+					 : strcmp(obs_property_list_item_string(list, i),
+						  obs_data_get_string(settings, name)) == 0;
+		if (match)
+			return qstr(obs_property_list_item_name(list, i));
+	}
+	return QString();
+}
+
+struct DeviceSelection {
+	QString device; /* Empty when the device is not connected. */
+	QString mode;   /* Empty when the device does not offer the mode at OBS's frame rate. */
+};
+
+/*
+ * Resolves a selection against OBS's DeckLink output properties. They list the connected devices
+ * and only the modes matching OBS's frame rate, which is what the output requires when it starts.
+ */
+DeviceSelection resolveSelection(obs_data_t *settings)
+{
+	DeviceSelection result;
+	std::unique_ptr<obs_properties_t, decltype(&obs_properties_destroy)> props(
+		obs_get_output_properties(kDeckLinkOutput), obs_properties_destroy);
+	if (!props)
+		return result;
+
+	OBSDataAutoRelease copy = obs_data_create();
+	obs_data_apply(copy, settings);
+	/* Runs the device list's modified callback, which fills the mode list for that device. */
+	obs_properties_apply_settings(props.get(), copy);
+	result.device = selectedItemName(props.get(), "device_hash", copy);
+	if (!result.device.isEmpty())
+		result.mode = selectedItemName(props.get(), "mode_id", copy);
+	return result;
+}
+
+} // namespace
+
+DeviceDestination::DeviceDestination(Manager *manager, QString id)
+	: OutputDestination(manager, std::move(id), DestinationType::Device),
+	  settings_(OBSDataAutoRelease(defaults()).Get())
+{
+}
+
+bool DeviceDestination::available()
+{
+	return obs_get_output_flags(kDeckLinkOutput) != 0;
+}
+
+obs_properties_t *DeviceDestination::properties()
+{
+	obs_properties_t *props = obs_get_output_properties(kDeckLinkOutput);
+	/* Auto start is only read by OBS's own DeckLink Output tool. */
+	if (obs_property_t *autoStart = props ? obs_properties_get(props, "auto_start") : nullptr)
+		obs_property_set_visible(autoStart, false);
+	return props;
+}
+
+obs_data_t *DeviceDestination::defaults()
+{
+	obs_data_t *defaults = obs_output_defaults(kDeckLinkOutput);
+	return defaults ? defaults : obs_data_create();
+}
+
+void DeviceDestination::setOutputSettings(obs_data_t *settings)
+{
+	settings_ = OBSDataAutoRelease(defaults()).Get();
+	if (settings)
+		obs_data_apply(settings_, settings);
+
+	/* Names describe the destination while the device is disconnected, as in OBS's own lists. */
+	const DeviceSelection selection = resolveSelection(settings_);
+	if (!selection.device.isEmpty()) {
+		obs_data_set_string(settings_, "device_name", utf8(selection.device).c_str());
+		if (selection.mode.isEmpty())
+			obs_data_erase(settings_, "mode_name");
+		else
+			obs_data_set_string(settings_, "mode_name", utf8(selection.mode).c_str());
+	} else if (!*obs_data_get_string(settings_, "device_hash")) {
+		obs_data_erase(settings_, "device_name");
+		obs_data_erase(settings_, "mode_name");
+	}
+	emit changed();
+}
+
+void DeviceDestination::setAudioTrack(int track)
+{
+	track_ = std::clamp(track, 0, kAudioTracks - 1);
+	emit changed();
+}
+
+QString DeviceDestination::summary() const
+{
+	const QString device = qstr(obs_data_get_string(settings_, "device_name"));
+	if (device.isEmpty())
+		return T("Destination.Device.None");
+	const QString mode = qstr(obs_data_get_string(settings_, "mode_name"));
+	return mode.isEmpty() ? device : QStringLiteral("%1 — %2").arg(device, mode);
+}
+
+QString DeviceDestination::audioSummary() const
+{
+	return audioTrackLabel(track_);
+}
+
+bool DeviceDestination::start()
+{
+	if (active())
+		return true;
+
+	Mix *mix = resolveMix();
+	if (!mix) {
+		setError(T("Destination.Error.NoMix"));
+		return false;
+	}
+	video_t *video = mix->video();
+	if (!video) {
+		setError(T("Destination.Error.NoVideo"));
+		return false;
+	}
+	if (!available()) {
+		setError(T("Destination.Device.Error.Unavailable"));
+		return false;
+	}
+	if (!*obs_data_get_string(settings_, "device_hash")) {
+		setError(T("Destination.Device.Error.NoDevice"));
+		return false;
+	}
+	const DeviceSelection selection = resolveSelection(settings_);
+	if (selection.device.isEmpty()) {
+		setError(T("Destination.Device.Error.NotConnected")
+				 .arg(qstr(obs_data_get_string(settings_, "device_name"))));
+		return false;
+	}
+	if (selection.mode.isEmpty()) {
+		setError(T("Destination.Device.Error.Mode"));
+		return false;
+	}
+
+	/* The output keeps a reference to its settings; give it its own copy. */
+	OBSDataAutoRelease settings = obs_data_create();
+	obs_data_apply(settings, settings_);
+	OBSOutputAutoRelease output =
+		obs_output_create(kDeckLinkOutput, (utf8(name()) + " device").c_str(), settings, nullptr);
+	if (!output) {
+		setError(T("Destination.Error.OutputType").arg(qstr(kDeckLinkOutput)));
+		return false;
+	}
+	/* The output scales the mix to the device mode itself (see its video conversion). */
+	obs_output_set_media(output, video, obs_get_audio());
+	obs_output_set_mixer(output, size_t(track_));
+	output_ = output.Get();
+	return startOutput(mix, T("Destination.Device.Error.Start"));
+}
+
+void DeviceDestination::save(obs_data_t *data) const
+{
+	Destination::save(data);
+	obs_data_set_obj(data, "output_settings", settings_);
+	obs_data_set_int(data, "audio_track", track_);
+}
+
+void DeviceDestination::load(obs_data_t *data)
+{
+	Destination::load(data);
+	OBSDataAutoRelease settings = obs_data_get_obj(data, "output_settings");
+	settings_ = OBSDataAutoRelease(defaults()).Get();
+	if (settings)
+		obs_data_apply(settings_, settings);
+	const int track = int(obs_data_get_int(data, "audio_track"));
+	if (track >= 0 && track < kAudioTracks)
+		track_ = track;
 }
 
 } // namespace dm

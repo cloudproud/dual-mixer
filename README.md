@@ -10,7 +10,7 @@ Run any number of independent video mixes inside one OBS Studio instance. Each m
 - **Studio Mode per mix:** each row has a scene list, Preview, Program, a Transition button, Quick Transitions (Cut, Fade, Fade to Black and others) and a T-bar.
 - **OBS transitions:** each mix follows the transition selected in OBS (the global transition) or overrides it with another one. Every mix plays its own copy, so stingers run on several mixes at once.
 - **Global Transition:** cue new Previews on the mixes you want to change, then press **Transition** (top right). Only mixes marked *Global* with a new cue switch. The others keep their Program.
-- **Outputs per mix:** send a mix's Program to a projector (fullscreen on a display, or windowed), a recording, or a stream. A mix can feed several outputs at once.
+- **Outputs per mix:** send a mix's Program to a projector (fullscreen on a display, or windowed), a recording, a stream, or a Blackmagic Design device (DeckLink, UltraStudio, Intensity). A mix can feed several outputs at once.
 - **Native OBS stays native:** OBS Main appears as a mix. Its Stream, Recording, Virtual Camera and Replay Buffer keep their OBS settings, hotkeys and obs-websocket control.
 - **Workspace:** collapse rows, focus one mix, or pop a mix out into its own dock.
 - **Hotkeys** for every mix: Transition, Cut, next/previous Preview, each quick transition, plus one global "Transition all cued mixes".
@@ -18,8 +18,9 @@ Run any number of independent video mixes inside one OBS Studio instance. Each m
 ## Good to know
 
 - **Native outputs always carry OBS Main.** OBS attaches its own streaming and recording to the main canvas, so to send another mix to a stream or file, add an output to that mix.
-- **Mixes are video only.** Recordings and streams take audio from OBS's mixer tracks, chosen per output. A mix can optionally add its Program audio to OBS's audio output.
-- **Video settings lock while plugin outputs run.** Stop plugin recordings and streams before changing OBS's video settings; OBS refuses video changes while any output is active.
+- **Mixes are video only.** Recordings, streams and Blackmagic devices take audio from OBS's mixer tracks, chosen per output. A mix can optionally add its Program audio to OBS's audio output.
+- **Blackmagic devices use OBS's DeckLink output.** They need Blackmagic Desktop Video installed. Only modes matching OBS's frame rate are offered, and the mix is scaled to the mode's resolution. A device feeds one output at a time, so don't point OBS's own **Tools → DeckLink Output** at the same device.
+- **Video settings lock while plugin outputs run.** Stop plugin recordings, streams and devices before changing OBS's video settings; OBS refuses video changes while any output is active.
 - **Settings are saved per scene collection,** including stream keys of plugin streams.
 
 ## Requirements

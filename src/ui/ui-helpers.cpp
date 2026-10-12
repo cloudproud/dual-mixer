@@ -224,7 +224,7 @@ QToolButton *createNativeChip(const NativeOutput &output, QWidget *parent)
 void addDestinationActions(QMenu *menu, Manager *manager, const QString &mixId, QWidget *dialogParent)
 {
 	QPointer<QWidget> parent(dialogParent);
-	for (DestinationType type : {DestinationType::Display, DestinationType::Recording, DestinationType::Stream}) {
+	for (DestinationType type : kDestinationTypes) {
 		menu->addAction(T("Destination.AddType").arg(destinationTypeName(type)), menu,
 				[manager, mixId, type, parent]() {
 					Destination *destination = manager->addDestination(type, mixId);

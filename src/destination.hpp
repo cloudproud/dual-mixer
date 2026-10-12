@@ -27,7 +27,11 @@ class Mix;
 class ProjectorWindow;
 
 /* Where a mix's Program goes. The type belongs to the destination, never to the mix. */
-enum class DestinationType { Display, Recording, Stream };
+enum class DestinationType { Display, Recording, Stream, Device };
+
+/* Every destination type, in the order offered to the user. */
+inline constexpr DestinationType kDestinationTypes[] = {DestinationType::Display, DestinationType::Recording,
+							DestinationType::Stream, DestinationType::Device};
 
 const char *destinationTypeId(DestinationType type);
 std::optional<DestinationType> destinationTypeFromId(const char *id);
@@ -66,8 +70,11 @@ public:
 	/* Synchronous teardown used when the mix or OBS goes away. */
 	virtual void forceStop() = 0;
 
-	/* True when the destination owns encoders bound to its mix's video while active. */
-	virtual bool holdsEncoders() const = 0;
+	/*
+	 * True when the destination's output is bound to its mix's video while active: the mix's
+	 * canvas must not be recreated and the destination cannot be re-routed until it stops.
+	 */
+	virtual bool holdsVideo() const = 0;
 	virtual QString summary() const = 0;
 	virtual QString audioSummary() const = 0;
 
@@ -105,7 +112,7 @@ public:
 	bool start() override;
 	void stop() override;
 	void forceStop() override;
-	bool holdsEncoders() const override { return false; }
+	bool holdsVideo() const override { return false; }
 	QString summary() const override;
 	QString audioSummary() const override;
 
@@ -133,18 +140,52 @@ private:
 	QPointer<ProjectorWindow> window_;
 };
 
+/* A destination backed by an OBS output; follows the output's lifecycle through its signals. */
+class OutputDestination : public Destination {
+	Q_OBJECT
+
+public:
+	OutputDestination(Manager *manager, QString id, DestinationType type);
+	~OutputDestination() override;
+
+	void stop() override;
+	void forceStop() override;
+	bool holdsVideo() const override { return true; }
+
+protected:
+	/* Connects to output_ and starts it. On failure releases it and reports startError (or OBS's error). */
+	bool startOutput(Mix *mix, const QString &startError);
+	/* Drops the output, then whatever the subclass keeps for it (releaseOutput). */
+	void release();
+	/* Releases resources that must outlive the output (encoders, service). */
+	virtual void releaseOutput() {}
+
+	OBSOutput output_;
+
+private:
+	void disconnectSignals();
+	void handleStopped(int code, const QString &error);
+	static void onStart(void *data, calldata_t *cd);
+	static void onStop(void *data, calldata_t *cd);
+	static void onReconnect(void *data, calldata_t *cd);
+	static void onReconnectSuccess(void *data, calldata_t *cd);
+
+	OBSSignal startSignal_;
+	OBSSignal stopSignal_;
+	OBSSignal reconnectSignal_;
+	OBSSignal reconnectSuccessSignal_;
+};
+
 /* Shared encoder/audio configuration for destinations that encode (recording, streaming). */
-class EncodedDestination : public Destination {
+class EncodedDestination : public OutputDestination {
 	Q_OBJECT
 
 public:
 	EncodedDestination(Manager *manager, QString id, DestinationType type);
+	/* Encoders must be released after the output, so stop while they still exist. */
 	~EncodedDestination() override;
 
 	bool start() override;
-	void stop() override;
-	void forceStop() override;
-	bool holdsEncoders() const override { return true; }
 	QString audioSummary() const override;
 
 	const QString &videoEncoderId() const { return videoEncoderId_; }
@@ -170,29 +211,17 @@ public:
 protected:
 	/* Creates the output (and anything it depends on). Encoder settings may be adjusted. */
 	virtual OBSOutput createOutput(obs_data_t *videoSettings, obs_data_t *audioSettings, QString &error) = 0;
-	virtual void releaseOutput() {}
+	void releaseOutput() override;
 
 private:
-	void release();
-	void handleStopped(int code, const QString &error);
-	static void onStart(void *data, calldata_t *cd);
-	static void onStop(void *data, calldata_t *cd);
-	static void onReconnect(void *data, calldata_t *cd);
-	static void onReconnectSuccess(void *data, calldata_t *cd);
-
 	QString videoEncoderId_;
 	OBSData videoSettings_;
 	QString audioEncoderId_;
 	int audioBitrate_ = 160;
 	std::vector<int> tracks_{0};
 
-	OBSOutput output_;
 	OBSEncoder videoEncoder_;
 	std::vector<OBSEncoder> audioEncoders_;
-	OBSSignal startSignal_;
-	OBSSignal stopSignal_;
-	OBSSignal reconnectSignal_;
-	OBSSignal reconnectSuccessSignal_;
 };
 
 class RecordingDestination final : public EncodedDestination {
@@ -251,12 +280,47 @@ public:
 
 protected:
 	OBSOutput createOutput(obs_data_t *videoSettings, obs_data_t *audioSettings, QString &error) override;
-	void releaseOutput() override { service_ = nullptr; }
+	void releaseOutput() override;
 
 private:
 	QString serviceId_ = QStringLiteral("rtmp_custom");
 	OBSData serviceSettings_;
 	OBSService service_;
+};
+
+/*
+ * A Blackmagic Design device (DeckLink, UltraStudio, Intensity) driven by OBS's DeckLink output:
+ * uncompressed video scaled to the device mode, plus one OBS audio track as 48 kHz stereo.
+ */
+class DeviceDestination final : public OutputDestination {
+	Q_OBJECT
+
+public:
+	DeviceDestination(Manager *manager, QString id);
+
+	bool start() override;
+	QString summary() const override;
+	QString audioSummary() const override;
+
+	/* Settings of OBS's DeckLink output: device_hash, mode_id, keyer, force_sdr, plus display names. */
+	obs_data_t *outputSettings() const { return settings_; }
+	void setOutputSettings(obs_data_t *settings);
+	/* OBS audio mixer track (0-based) sent to the device. */
+	int audioTrack() const { return track_; }
+	void setAudioTrack(int track);
+
+	/* False when OBS's DeckLink output is not loaded (Blackmagic Desktop Video not installed). */
+	static bool available();
+	/* OBS's DeckLink output properties without the options of OBS's own DeckLink Output tool. */
+	static obs_properties_t *properties();
+	static obs_data_t *defaults();
+
+	void save(obs_data_t *data) const override;
+	void load(obs_data_t *data) override;
+
+private:
+	OBSData settings_;
+	int track_ = 0;
 };
 
 } // namespace dm

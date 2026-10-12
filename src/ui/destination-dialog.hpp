@@ -41,7 +41,10 @@ private:
 	QWidget *buildDisplay();
 	QWidget *buildRecording();
 	QWidget *buildStream();
+	QWidget *buildDevice();
 	QWidget *buildEncoding();
+	/* Adds one button per OBS audio track to tracks_. */
+	QWidget *buildTrackPicker(const std::vector<int> &selected, bool multiple, QWidget *parent);
 	void rebuildVideoForm();
 	void rebuildServiceForm();
 
@@ -65,6 +68,9 @@ private:
 	QVBoxLayout *serviceHost_ = nullptr;
 	PropertiesForm *serviceForm_ = nullptr;
 	OBSData serviceSettings_;
+
+	/* Device */
+	OBSData deviceSettings_;
 
 	/* Encoding */
 	QComboBox *videoEncoder_ = nullptr;
