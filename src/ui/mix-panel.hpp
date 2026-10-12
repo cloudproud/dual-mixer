@@ -45,7 +45,8 @@ public:
 	QSize sizeHint() const override { return QFrame::sizeHint().expandedTo(minimumSizeHint()); }
 	/* Forces the compact (collapsed) presentation without changing the saved state. */
 	void setForcedCompact(bool compact);
-	/* Stops rendering and disconnects from the mix; call before the mix is destroyed. */
+	/* Stops rendering and disconnects from the mix; call before the mix is destroyed.
+	 * Idempotent: later calls (including the destructor's) are no-ops. */
 	void detach();
 
 signals:
@@ -78,6 +79,7 @@ private:
 	Manager *manager_;
 	bool inOwnDock_;
 	bool forcedCompact_ = false;
+	bool detached_ = false;
 
 	QCheckBox *collapseCheck_ = nullptr;
 	QLabel *nameLabel_ = nullptr;

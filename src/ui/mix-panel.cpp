@@ -223,13 +223,17 @@ MixPanel::~MixPanel()
 
 void MixPanel::detach()
 {
+	/* Callers detach, then deleteLater() and delete the mix; the destructor's call must not
+	 * touch the (by then freed) mix again. */
+	if (detached_)
+		return;
+	detached_ = true;
 	stateTimer_.stop();
 	if (previewDisplay_)
 		previewDisplay_->destroyDisplay();
 	if (programDisplay_)
 		programDisplay_->destroyDisplay();
-	if (mix_)
-		disconnect(mix_, nullptr, this, nullptr);
+	disconnect(mix_, nullptr, this, nullptr);
 	disconnect(manager_, nullptr, this, nullptr);
 }
 
